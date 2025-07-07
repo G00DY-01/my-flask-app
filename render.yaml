@@ -8,10 +8,7 @@ services:
     startCommand: "gunicorn main:app"
     envVars:
       - key: REDIS_URL
-        fromService:
-          name: red-d1lq916mcj7s73ar5ejg
-          type: redis
-          property: connectionString
+        value: redis://red-d1lq916mcj7s73ar5ejg:6379
 
   - type: worker
     name: ai-yt-worker
@@ -22,7 +19,4 @@ services:
     startCommand: "celery -A worker worker --loglevel=info"
     envVars:
       - key: REDIS_URL
-        fromService:
-          name: red-d1lq916mcj7s73ar5ejg
-          type: redis
-          property: connectionString
+        value: redis://red-d1lq916mcj7s73ar5ejg:6379
