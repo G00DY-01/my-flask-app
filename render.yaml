@@ -10,7 +10,7 @@ services:
       - key: REDIS_URL
         fromService:
           name: redis
-          type: key_value
+          type: redis
           property: connectionString
 
   - type: worker
@@ -24,5 +24,5 @@ services:
       - key: REDIS_URL
         fromService:
           name: redis
-          type: key_value
+          type: redis
           property: connectionString
