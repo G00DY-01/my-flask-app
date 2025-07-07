@@ -9,7 +9,7 @@ services:
     envVars:
       - key: REDIS_URL
         fromService:
-          name: redis
+          name: red-d1lq916mcj7s73ar5ejg
           type: redis
           property: connectionString
 
@@ -23,6 +23,6 @@ services:
     envVars:
       - key: REDIS_URL
         fromService:
-          name: redis
+          name: red-d1lq916mcj7s73ar5ejg
           type: redis
           property: connectionString
