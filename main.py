@@ -1,88 +1,57 @@
 import os
-import json
 import uuid
-import subprocess
 from flask import Flask, request, jsonify
+from celery import Celery
+from celery.result import AsyncResult
 
 app = Flask(__name__)
 
-UPLOAD_FOLDER = "files"
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+# Redis URL from environment or fallback
+redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 
-def download_file(url, filename):
-    import requests
-    response = requests.get(url)
-    with open(filename, "wb") as f:
-        f.write(response.content)
+# Celery setup
+celery = Celery(app.name, broker=redis_url, backend=redis_url)
 
-def write_srt(captions, filepath):
-    def ms_to_timestamp(ms):
-        s, ms = divmod(ms, 1000)
-        m, s = divmod(s, 60)
-        h, m = divmod(m, 60)
-        return f"{h:02}:{m:02}:{s:02},{ms:03}"
+@celery.task(bind=True)
+def process_video_audio(self, video_url, audio_url, caption_data, duration):
+    # Put your actual video/audio processing logic here.
+    # For example, download video/audio, overlay captions, etc.
 
-    with open(filepath, "w", encoding="utf-8") as f:
-        for i, word_data in enumerate(captions):
-            start = ms_to_timestamp(int(word_data["startMs"]))
-            end = ms_to_timestamp(int(word_data["endMs"]))
-            text = word_data["word"]
-            f.write(f"{i + 1}\n{start} --> {end}\n{text}\n\n")
+    import time
+    time.sleep(15)  # Simulate a long task
 
-def overlay_captions(video_path, srt_path, output_path):
-    abs_srt_path = os.path.abspath(srt_path)
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", video_path,
-        "-vf", f"subtitles='{abs_srt_path}':force_style='FontName=Arial,FontSize=48,PrimaryColour=&H00FFFFFF&,OutlineColour=&H00000000&,BorderStyle=1,Outline=3,Shadow=0'",
-        "-c:a", "copy",
-        output_path
-    ]
-    subprocess.run(cmd, check=True)
-
-def combine_audio_video(video_path, audio_path, output_path):
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", video_path,
-        "-i", audio_path,
-        "-c:v", "copy",
-        "-c:a", "aac",
-        "-shortest",
-        output_path
-    ]
-    subprocess.run(cmd, check=True)
+    # Generate a fake output file path (in real usage, save to cloud storage)
+    output_url = f"https://yourcdn.com/final_output_{self.request.id}.mp4"
+    return {"output_url": output_url}
 
 @app.route("/process", methods=["POST"])
 def process():
-    try:
-        data = request.get_json()
+    data = request.get_json()
+    video_url = data.get("video_url")
+    audio_url = data.get("audio_url")
+    caption_data = data.get("caption_data")
+    duration = data.get("duration")
 
-        video_url = data["video_url"]
-        audio_url = data["audio_url"]
-        duration = float(data["duration"])
-        captions = data["caption_data"]
+    if not (video_url and audio_url and caption_data and duration):
+        return jsonify({"error": "Missing parameters"}), 400
 
-        if isinstance(captions, str):
-            captions = json.loads(captions)
+    task = process_video_audio.apply_async(args=[video_url, audio_url, caption_data, duration])
+    return jsonify({"task_id": task.id}), 202
 
-        uid = str(uuid.uuid4())
-        video_path = os.path.join(UPLOAD_FOLDER, f"{uid}_video.mp4")
-        audio_path = os.path.join(UPLOAD_FOLDER, f"{uid}_audio.mp3")
-        srt_path = os.path.join(UPLOAD_FOLDER, f"{uid}.srt")
-        captioned_path = os.path.join(UPLOAD_FOLDER, f"{uid}_captioned.mp4")
-        final_path = os.path.join(UPLOAD_FOLDER, f"{uid}_final.mp4")
+@app.route("/status/<task_id>", methods=["GET"])
+def task_status(task_id):
+    task_result = AsyncResult(task_id, app=celery)
+    if task_result.state == "PENDING":
+        response = {"state": task_result.state, "status": "Pending..."}
+    elif task_result.state == "FAILURE":
+        response = {"state": task_result.state, "status": str(task_result.info)}
+    elif task_result.state == "SUCCESS":
+        response = {"state": task_result.state, "result": task_result.result}
+    else:
+        response = {"state": task_result.state, "status": str(task_result.info)}
 
-        download_file(video_url, video_path)
-        download_file(audio_url, audio_path)
-        write_srt(captions, srt_path)
-        overlay_captions(video_path, srt_path, captioned_path)
-        combine_audio_video(captioned_path, audio_path, final_path)
-
-        return jsonify({"video": final_path}), 200
-
-    except Exception as e:
-        print("Error:", e)
-        return jsonify({"error": str(e)}), 500
+    return jsonify(response)
 
 if __name__ == "__main__":
-    app.run(debug=False, host="0.0.0.0", port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
