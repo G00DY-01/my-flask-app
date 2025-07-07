@@ -57,13 +57,16 @@ def process_video():
                 f"fontcolor=white:fontsize=48:borderw=2:x=(w-text_w)/2:y=h-150"
             )
 
-        filter_complex = ",".join(drawtext_filters)
+       # Write filter_complex to file to avoid length limit
+        filter_script_path = f"files/{uid}_filters.txt"
+        with open(filter_script_path, "w") as f:
+            f.write(",".join(drawtext_filters))
 
-        captioned_path = f"files/{uid}_captioned.mp4"
+        # Use -filter_complex_script to apply filters
         subprocess.run([
             "ffmpeg", "-y",
             "-i", trimmed_path,
-            "-vf", filter_complex,
+            "-filter_complex_script", filter_script_path,
             "-c:a", "copy",
             captioned_path
         ], check=True)
