@@ -1,2 +1,2 @@
-web: gunicorn main:app --bind 0.0.0.0:$PORT
-worker: celery -A main.celery worker --loglevel=info
+web: gunicorn main:app
+worker: celery -A worker worker --loglevel=info
