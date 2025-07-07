@@ -1,61 +1,52 @@
-from celery import Celery
 import os
-from moviepy.editor import VideoFileClip, AudioFileClip, TextClip, CompositeVideoClip
-import tempfile
-import requests
+import uuid
 import json
+import requests
+from moviepy.editor import VideoFileClip, AudioFileClip, TextClip, CompositeVideoClip
+from celery import Celery
 
-def create_celery_app(app=None):
-    redis_url = os.getenv("REDIS_URL")
-    celery = Celery(
-        "worker",
-        broker=redis_url,
-        backend=redis_url,
-    )
-    celery.conf.update(task_track_started=True)
-    return celery
+celery = Celery('worker',
+    broker='redis://red-d1lq916mcj7s73ar5ejg:6379',
+    backend='redis://red-d1lq916mcj7s73ar5ejg:6379'
+)
 
-celery = create_celery_app()
+def download_file(url, filename):
+    r = requests.get(url)
+    with open(filename, 'wb') as f:
+        f.write(r.content)
 
-@celery.task(name="worker.process_video")
-def process_video(video_url, audio_url, caption_data, duration, task_id):
-    duration = float(duration)
-    word_data = json.loads(caption_data)
+def create_caption_clip(text, start, end):
+    caption = TextClip(
+        text,
+        fontsize=60,
+        font='Arial-Bold',
+        color='white',
+        stroke_color='black',
+        stroke_width=2,
+        method='caption',
+        size=(1080, None)
+    ).set_start(start).set_end(end).set_position(('center', 'bottom'))
+    return caption
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        video_path = os.path.join(tmpdir, "video.mp4")
-        audio_path = os.path.join(tmpdir, "audio.mp3")
-        output_path = os.path.join(tmpdir, "output.mp4")
+@celery.task(name='worker.process_video_task')
+def process_video_task(video_url, audio_url, duration, caption_data):
+    video_filename = f'{uuid.uuid4()}.mp4'
+    audio_filename = f'{uuid.uuid4()}.mp3'
+    output_filename = f'output_{uuid.uuid4()}.mp4'
 
-        with open(video_path, "wb") as f:
-            f.write(requests.get(video_url).content)
-        with open(audio_path, "wb") as f:
-            f.write(requests.get(audio_url).content)
+    download_file(video_url, video_filename)
+    download_file(audio_url, audio_filename)
 
-        video = VideoFileClip(video_path).subclip(0, duration)
-        audio = AudioFileClip(audio_path)
-        video = video.set_audio(audio)
+    video = VideoFileClip(video_filename).subclip(0, duration)
+    audio = AudioFileClip(audio_filename)
+    video = video.set_audio(audio)
 
-        caption_clips = []
-        for item in word_data:
-            word = item["word"]
-            start = float(item["startMs"]) / 1000
-            end = float(item["endMs"]) / 1000
+    captions = []
+    word_durations = json.loads(caption_data)
+    for item in word_durations:
+        captions.append(create_caption_clip(item['word'], item['startMs'] / 1000, item['endMs'] / 1000))
 
-            txt_clip = TextClip(
-                word,
-                fontsize=70,
-                font="Arial-Bold",
-                color="white",
-                stroke_color="black",
-                stroke_width=3,
-                method="caption",
-                size=(video.w, None)
-            ).set_position("center").set_start(start).set_end(end)
+    final = CompositeVideoClip([video, *captions])
+    final.write_videofile(output_filename, codec='libx264', audio_codec='aac')
 
-            caption_clips.append(txt_clip)
-
-        final = CompositeVideoClip([video] + caption_clips)
-        final.write_videofile(output_path, codec="libx264", audio_codec="aac")
-
-        print(f"Generated video at {output_path}")
+    return {'output': output_filename}
