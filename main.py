@@ -1,31 +1,60 @@
-# Get audio duration using ffprobe
-result = subprocess.run([
-    "ffprobe", "-i", input_audio,
-    "-show_entries", "format=duration",
-    "-v", "quiet",
-    "-of", "csv=p=0"
-], capture_output=True, text=True)
+from flask import Flask, request, jsonify
+import subprocess
+import uuid
+import os
 
-audio_duration = float(result.stdout.strip())
-video_duration = round(audio_duration + 3, 2)  # Max 3 seconds extra
+app = Flask(__name__)
 
-# Trim video to match audio duration (+ up to 3 seconds)
-trimmed_video = f"{output_id}_trimmed_video.mp4"
-subprocess.run([
-    "ffmpeg", "-y",
-    "-i", input_video,
-    "-t", str(video_duration),
-    "-c", "copy",
-    trimmed_video
-])
+@app.route("/process", methods=["POST"])
+def process_video():
+    data = request.get_json()
 
-# Merge trimmed video + audio
-subprocess.run([
-    "ffmpeg", "-y",
-    "-i", trimmed_video,
-    "-i", input_audio,
-    "-map", "0:v:0",
-    "-map", "1:a:0",
-    "-shortest",
-    final_output
-], check=True)
+    video_url = data["video_url"]
+    audio_url = data["audio_url"]
+    duration = int(data["duration"])  # in seconds
+
+    output_id = str(uuid.uuid4())
+
+    input_video = f"{output_id}_video.mp4"
+    input_audio = f"{output_id}_audio.mp3"
+    final_output = f"{output_id}_final.mp4"
+
+    # Download video and audio
+    subprocess.run(["curl", "-L", video_url, "-o", input_video], check=True)
+    subprocess.run(["curl", "-L", audio_url, "-o", input_audio], check=True)
+
+    # Trim video to duration + 2s (as buffer to avoid audio cutoff)
+    trimmed_video = f"{output_id}_trimmed.mp4"
+    subprocess.run([
+        "ffmpeg", "-y",
+        "-i", input_video,
+        "-t", str(duration + 2),
+        "-c", "copy",
+        trimmed_video
+    ], check=True)
+
+    # Combine trimmed video with audio
+    subprocess.run([
+        "ffmpeg", "-y",
+        "-i", trimmed_video,
+        "-i", input_audio,
+        "-map", "0:v:0", "-map", "1:a:0",
+        "-c:v", "copy",
+        "-shortest", final_output
+    ], check=True)
+
+    # Upload to file.io and return the link
+    result = subprocess.run(
+        ["curl", "-F", f"file=@{final_output}", "https://file.io"],
+        capture_output=True, text=True
+    )
+
+    # Cleanup
+    for f in [input_video, input_audio, trimmed_video, final_output]:
+        if os.path.exists(f):
+            os.remove(f)
+
+    return jsonify(result=result.stdout)
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8080)
