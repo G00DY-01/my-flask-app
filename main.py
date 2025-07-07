@@ -1,28 +1,29 @@
 from flask import Flask, request, jsonify
-from worker import process_video_audio
+from worker import create_celery_app
+import os
+import uuid
 
 app = Flask(__name__)
+celery = create_celery_app(app)
 
-@app.route('/')
+@app.route("/", methods=["GET"])
 def index():
-    return '==> Your service is live 🎉', 200
+    return "processing"
 
-@app.route('/process', methods=['POST'])
+@app.route("/process", methods=["POST"])
 def process():
-    data = request.get_json()
+    data = request.json
+    task_id = str(uuid.uuid4())
 
-    video_url = data.get('video_url')
-    audio_url = data.get('audio_url')
-    caption_data = data.get('caption_data')
-    duration = data.get('audioLengthInSeconds') or data.get('duration')
+    celery.send_task(
+        "worker.process_video",
+        args=[
+            data["video_url"],
+            data["audio_url"],
+            data["caption_data"],
+            data["duration"],
+            task_id,
+        ],
+    )
 
-    if not all([video_url, audio_url, caption_data, duration]):
-        return jsonify({"error": "Missing required parameters"}), 400
-
-    # Send the processing task to Celery worker asynchronously
-    task = process_video_audio.apply_async(args=[video_url, audio_url, caption_data, duration])
-
-    return jsonify({"task_id": task.id, "status": "processing"}), 202
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=10000)
+    return jsonify({"status": "processing", "task_id": task_id})
