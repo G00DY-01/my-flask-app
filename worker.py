@@ -1,91 +1,61 @@
-import os
-import subprocess
-import json
 from celery import Celery
+import os
+from moviepy.editor import VideoFileClip, AudioFileClip, TextClip, CompositeVideoClip
+import tempfile
+import requests
+import json
 
-# Use your Redis URL here
-redis_url = 'redis://red-d1lq916mcj7s73ar5ejg:6379'
+def create_celery_app(app=None):
+    redis_url = os.getenv("REDIS_URL")
+    celery = Celery(
+        "worker",
+        broker=redis_url,
+        backend=redis_url,
+    )
+    celery.conf.update(task_track_started=True)
+    return celery
 
-app = Celery('worker', broker=redis_url, backend=redis_url)
+celery = create_celery_app()
 
-@app.task
-def process_video_audio(video_url, audio_url, caption_data, duration):
-    """
-    This task:
-    - Downloads the video and audio
-    - Applies captions with timing and big font size
-    - Trims video and audio to the duration
-    - Combines audio and video into final output
-    """
+@celery.task(name="worker.process_video")
+def process_video(video_url, audio_url, caption_data, duration, task_id):
+    duration = float(duration)
+    word_data = json.loads(caption_data)
 
-    # Prepare filenames
-    video_file = '/tmp/input_video.mp4'
-    audio_file = '/tmp/input_audio.mp3'
-    output_file = '/tmp/output_video.mp4'
+    with tempfile.TemporaryDirectory() as tmpdir:
+        video_path = os.path.join(tmpdir, "video.mp4")
+        audio_path = os.path.join(tmpdir, "audio.mp3")
+        output_path = os.path.join(tmpdir, "output.mp4")
 
-    # Download video
-    subprocess.run(['wget', '-O', video_file, video_url], check=True)
+        with open(video_path, "wb") as f:
+            f.write(requests.get(video_url).content)
+        with open(audio_path, "wb") as f:
+            f.write(requests.get(audio_url).content)
 
-    # Download audio
-    subprocess.run(['wget', '-O', audio_file, audio_url], check=True)
+        video = VideoFileClip(video_path).subclip(0, duration)
+        audio = AudioFileClip(audio_path)
+        video = video.set_audio(audio)
 
-    # Build the complex filter for captions from caption_data (list of words with startMs and endMs)
-    # caption_data example: [{"word": "Hello", "startMs": 0, "endMs": 500}, ...]
-    captions = json.loads(caption_data)
+        caption_clips = []
+        for item in word_data:
+            word = item["word"]
+            start = float(item["startMs"]) / 1000
+            end = float(item["endMs"]) / 1000
 
-    # Create subtitles file (.ass) with big bold two-layer style captions
-    ass_file = '/tmp/captions.ass'
-    with open(ass_file, 'w', encoding='utf-8') as f:
-        f.write('[Script Info]\n')
-        f.write('ScriptType: v4.00+\n')
-        f.write('Collisions: Normal\n')
-        f.write('PlayResX: 1920\n')
-        f.write('PlayResY: 1080\n')
-        f.write('\n[V4+ Styles]\n')
-        f.write('Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, '
-                'Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, '
-                'Alignment, MarginL, MarginR, MarginV, Encoding\n')
-        # Two layers style for outline and shadow
-        f.write('Style: BigCaption1, Arial, 72, &H00FFFFFF, &H000000FF, &H00000000, &H80000000, 1, 0, 0, 0, 100, 100, 0, 0, 3, 3, 0, 2, 10, 10, 10, 1\n')
-        f.write('Style: BigCaption2, Arial, 72, &H00FFFFFF, &H00000000, &H00000000, &H00000000, 1, 0, 0, 0, 100, 100, 0, 0, 1, 1, 0, 2, 10, 10, 10, 1\n')
-        f.write('\n[Events]\n')
-        f.write('Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n')
+            txt_clip = TextClip(
+                word,
+                fontsize=70,
+                font="Arial-Bold",
+                color="white",
+                stroke_color="black",
+                stroke_width=3,
+                method="caption",
+                size=(video.w, None)
+            ).set_position("center").set_start(start).set_end(end)
 
-        for c in captions:
-            start = ms_to_ass_time(c['startMs'])
-            end = ms_to_ass_time(c['endMs'])
-            text = c['word'].replace('{', '').replace('}', '')  # basic sanitize
-            # Layer 1 (shadow)
-            f.write(f'Dialog: 1,{start},{end},BigCaption1,,0,0,0,,{text}\n')
-            # Layer 2 (main text)
-            f.write(f'Dialog: 0,{start},{end},BigCaption2,,0,0,0,,{text}\n')
+            caption_clips.append(txt_clip)
 
-    # Trim video and audio to duration and add subtitles
-    cmd = [
-        'ffmpeg',
-        '-y',
-        '-i', video_file,
-        '-i', audio_file,
-        '-filter_complex', f"[0:v][1:a]concat=n=1:v=1:a=1[v][a];[v]subtitles={ass_file}:force_style='Fontsize=72,PrimaryColour=&H00FFFFFF' [vsub]",
-        '-map', '[vsub]',
-        '-map', '[a]',
-        '-t', str(duration),
-        output_file
-    ]
+        final = CompositeVideoClip([video] + caption_clips)
+        final.write_videofile(output_path, codec="libx264", audio_codec="aac")
 
-    # Run ffmpeg command
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(f"FFmpeg error: {result.stderr}")
-
-    # Return path or URL of output video - you may want to upload it somewhere
-    return output_file
-
-
-def ms_to_ass_time(ms):
-    """Convert milliseconds to ASS subtitle time format: H:MM:SS.CS"""
-    cs = int((ms % 1000) / 10)
-    s = int((ms / 1000) % 60)
-    m = int((ms / 60000) % 60)
-    h = int(ms / 3600000)
-    return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+        print(f"Generated video at {output_path}")
