@@ -1,24 +1,16 @@
 services:
   - type: web
-    name: flask-api
+    name: ai-yt-flask
     env: python
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "gunicorn main:app --bind 0.0.0.0:$PORT"
-    envVars:
-      - key: REDIS_URL
-        fromService:
-          name: your-redis-service-name
-          type: redis
-          property: connectionString
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn main:app --timeout 600 --bind 0.0.0.0:$PORT
+    plan: free
+    region: oregon
 
   - type: worker
-    name: celery-worker
+    name: ai-yt-worker
     env: python
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "celery -A worker worker --loglevel=info"
-    envVars:
-      - key: REDIS_URL
-        fromService:
-          name: your-redis-service-name
-          type: redis
-          property: connectionString
+    buildCommand: pip install -r requirements.txt
+    startCommand: celery -A worker worker --loglevel=info
+    plan: free
+    region: oregon
