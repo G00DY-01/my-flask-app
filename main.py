@@ -3,92 +3,106 @@ import uuid
 import json
 import requests
 import subprocess
-from flask import Flask, request, jsonify
+from flask import Flask, request, send_file
 
 app = Flask(__name__)
-os.makedirs("files", exist_ok=True)
 
-def download_file(url, filename):
-    with requests.get(url, stream=True) as r:
-        r.raise_for_status()
-        with open(filename, 'wb') as f:
-            for chunk in r.iter_content(chunk_size=8192):
-                f.write(chunk)
+# Caption styling (edit as needed)
+CAPTION_STYLE = {
+    "fontfile": "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "fontsize": 48,
+    "fontcolor": "white",
+    "borderw": 2,
+    "box": 1,
+    "boxcolor": "black@0.5",
+    "shadowcolor": "black",
+    "shadowx": 2,
+    "shadowy": 2
+}
+
+def generate_caption_file(word_durations, output_path):
+    """
+    Create an SRT file with word-level timings
+    """
+    def ms_to_srt_time(ms):
+        seconds, milliseconds = divmod(ms, 1000)
+        minutes, seconds = divmod(seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        return f"{hours:02}:{minutes:02}:{seconds:02},{milliseconds:03}"
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        for i, word in enumerate(word_durations):
+            start = ms_to_srt_time(int(word["startMs"]))
+            end = ms_to_srt_time(int(word["endMs"]))
+            f.write(f"{i+1}\n{start} --> {end}\n{word['word']}\n\n")
+
+def generate_captioned_video(input_video, subtitles_path, captioned_output):
+    """
+    Overlay subtitles (SRT) on video using FFmpeg
+    """
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", input_video,
+        "-vf", f"subtitles={subtitles_path}:force_style='FontName=DejaVuSans-Bold,FontSize={CAPTION_STYLE['fontsize']},PrimaryColour=&HFFFFFF&,BorderStyle=1,Outline=1,Shadow=1'",
+        "-c:a", "copy",
+        captioned_output
+    ]
+    subprocess.run(cmd, check=True)
+
+def merge_audio_with_video(video_path, audio_path, final_output_path):
+    """
+    Combine captioned video with TTS audio (replace original audio)
+    """
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", video_path,
+        "-i", audio_path,
+        "-c:v", "copy",
+        "-map", "0:v:0",
+        "-map", "1:a:0",
+        "-shortest",
+        final_output_path
+    ]
+    subprocess.run(cmd, check=True)
 
 @app.route('/process', methods=['POST'])
-def process_video():
+def process():
     try:
         data = request.get_json()
-        video_url = data['video_url']
-        audio_url = data['audio_url']
-        duration = float(data.get('duration', 60))
-        caption_data = data.get('caption_data', [])
 
-        uid = str(uuid.uuid4())
-        video_path = f"files/{uid}_video.mp4"
-        audio_path = f"files/{uid}_audio.mp3"
-        output_path = f"files/{uid}_final.mp4"
+        input_path = data.get('input_path')  # Trimmed video path
+        audio_path = data.get('audio_path')  # Murf audio path
+        word_durations = data.get('word_durations')  # Caption word timings
 
-        download_file(video_url, video_path)
-        download_file(audio_url, audio_path)
+        if not input_path or not audio_path or not word_durations:
+            return {"error": "Missing one of: input_path, audio_path, word_durations"}, 400
 
-        # Trim video to audio length (+1 second buffer)
-        trimmed_path = f"files/{uid}_trimmed.mp4"
-        subprocess.run([
-            "ffmpeg", "-y",
-            "-i", video_path,
-            "-t", str(duration + 1),
-            "-c", "copy",
-            trimmed_path
-        ], check=True)
+        if not os.path.exists(input_path) or not os.path.exists(audio_path):
+            return {"error": "Input or audio file does not exist"}, 404
 
-        # Generate caption drawtext filter
-        drawtext_filters = []
-        font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"  # Adjust if needed
+        base = os.path.splitext(os.path.basename(input_path))[0]
+        srt_path = f"files/{base}_captions.srt"
+        captioned_video_path = f"files/{base}_captioned.mp4"
+        final_output_path = f"files/{base}_final.mp4"
 
-        for word in caption_data:
-            start = int(word["startMs"]) / 1000
-            end = int(word["endMs"]) / 1000
-            text = word["word"].replace("'", "\\'")
+        # Step 1: Generate subtitle file
+        generate_caption_file(word_durations, srt_path)
 
-            drawtext_filters.append(
-                f"drawtext=fontfile='{font_path}':text='{text}':"
-                f"enable='between(t,{start},{end})':"
-                f"fontcolor=white:fontsize=48:borderw=2:x=(w-text_w)/2:y=h-150"
-            )
+        # Step 2: Overlay subtitles on video
+        generate_captioned_video(input_path, srt_path, captioned_video_path)
 
-       # Write filter_complex to file to avoid length limit
-        filter_script_path = f"files/{uid}_filters.txt"
-        with open(filter_script_path, "w") as f:
-            f.write(",".join(drawtext_filters))
+        # Step 3: Combine audio with captioned video
+        merge_audio_with_video(captioned_video_path, audio_path, final_output_path)
 
-        # Use -filter_complex_script to apply filters
-        subprocess.run([
-            "ffmpeg", "-y",
-            "-i", trimmed_path,
-            "-filter_complex_script", filter_script_path,
-            "-c:a", "copy",
-            captioned_path
-        ], check=True)
+        return send_file(final_output_path, as_attachment=True)
 
-        # Combine captioned video + audio
-        subprocess.run([
-            "ffmpeg", "-y",
-            "-i", captioned_path,
-            "-i", audio_path,
-            "-map", "0:v:0", "-map", "1:a:0",
-            "-c:v", "copy",
-            "-c:a", "aac",
-            output_path
-        ], check=True)
-
-        return jsonify({
-            "message": "Video processed successfully.",
-            "output_path": f"/{output_path}"
-        })
+    except subprocess.CalledProcessError as e:
+        return {"error": f"FFmpeg error: {e}"}, 500
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        import traceback
+        traceback.print_exc()
+        return {"error": f"Unexpected error: {str(e)}"}, 500
 
 if __name__ == '__main__':
     app.run(debug=True)
