@@ -1,58 +1,69 @@
 from flask import Flask, request, jsonify
 import subprocess
-import os
 import uuid
 import requests
-import json
+import os
 
 app = Flask(__name__)
 
 @app.route('/process', methods=['POST'])
 def process_video():
-    data = request.get_json()
+    try:
+        data = request.get_json()
+        video_url = data.get('video_url')
+        audio_url = data.get('audio_url')
+        duration = float(data.get('duration', 60))
 
-    video_url = data.get('video_url')
-    audio_url = data.get('audio_url')
+        if not video_url or not audio_url:
+            return jsonify({'error': 'Missing video_url or audio_url'}), 400
 
-    if not video_url or not audio_url:
-        return jsonify({"error": "Missing video_url or audio_url"}), 400
+        uid = str(uuid.uuid4())
+        video_path = f"{uid}_video.mp4"
+        audio_path = f"{uid}_audio.wav"
+        trimmed_path = f"{uid}_trimmed.mp4"
+        output_path = f"{uid}_final.mp4"
 
-    # Generate unique filenames
-    session_id = str(uuid.uuid4())
-    video_file = f"{session_id}_video.mp4"
-    audio_file = f"{session_id}_audio.mp3"
-    final_output = f"{session_id}_final.mp4"
+        # Download video
+        video_resp = requests.get(video_url)
+        with open(video_path, 'wb') as f:
+            f.write(video_resp.content)
 
-    # Download video
-    subprocess.run(['curl', '-L', '-o', video_file, video_url], check=True)
-    # Download audio
-    subprocess.run(['curl', '-L', '-o', audio_file, audio_url], check=True)
+        # Download audio
+        audio_resp = requests.get(audio_url)
+        with open(audio_path, 'wb') as f:
+            f.write(audio_resp.content)
 
-    # Combine video and audio
-    subprocess.run([
-        'ffmpeg', '-y',
-        '-i', video_file,
-        '-i', audio_file,
-        '-map', '0:v:0',
-        '-map', '1:a:0',
-        '-c:v', 'copy',
-        '-shortest',
-        final_output
-    ], check=True)
+        # Trim video to match or slightly exceed audio duration
+        max_duration = duration + 3
+        subprocess.run([
+            'ffmpeg', '-y',
+            '-i', video_path,
+            '-t', str(max_duration),
+            '-c:v', 'copy', '-an',
+            trimmed_path
+        ], check=True)
 
-    # Upload to file.io
-    result = subprocess.run(
-        ['curl', '-F', f'file=@{final_output}', 'https://file.io'],
-        capture_output=True, text=True
-    )
+        # Merge audio + trimmed video
+        subprocess.run([
+            'ffmpeg', '-y',
+            '-i', trimmed_path,
+            '-i', audio_path,
+            '-c:v', 'copy',
+            '-c:a', 'aac',
+            '-shortest',
+            output_path
+        ], check=True)
 
-    # Clean up temporary files
-    os.remove(video_file)
-    os.remove(audio_file)
-    os.remove(final_output)
+        # Respond with path or info
+        return jsonify({
+            'message': 'Video processed successfully.',
+            'output_path': f'/files/{output_path}'
+        })
 
-    # Return parsed JSON
-    return jsonify(json.loads(result.stdout))
+    except subprocess.CalledProcessError as e:
+        return jsonify({'error': f'FFmpeg failed: {e}'}), 500
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run()
